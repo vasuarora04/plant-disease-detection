@@ -1,0 +1,508 @@
+import streamlit as st
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing import image
+import numpy as np
+import pandas as pd
+from googletrans import Translator
+import tensorflow as tf
+import sqlite3
+import bcrypt
+import pickle
+from tensorflow.keras.layers import Input
+
+# ---------- DATABASE SETUP ----------
+conn = sqlite3.connect('users.db', check_same_thread=False)
+c = conn.cursor()
+
+# ---------- CHECK USER FUNCTION ----------
+def check_user(username, password):
+    c.execute("SELECT password, role FROM users WHERE username=?", (username,))
+    result = c.fetchone()
+    if result:
+        stored_pw, role = result
+        if bcrypt.checkpw(password.encode(), stored_pw.encode()):
+            return True, role
+    return False, None
+
+# ---------- ADD USER FUNCTION ----------
+def add_user(username, password, role):
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    try:
+        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (username, hashed, role))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+# Add default users only if they don't exist
+c.execute("SELECT COUNT(*) FROM users")
+if c.fetchone()[0] == 0:
+    add_user("admin", "adminpass", "Admin")
+    add_user("farmer1", "farmerpass", "Farmer")
+
+# ---------- DISEASE FUNCTIONS ----------
+def add_disease_to_db(symptom, disease_name, treatment):
+    try:
+        c.execute("INSERT INTO diseases (disease_name, symptom, treatment) VALUES (?, ?, ?)",
+                  (disease_name, symptom, treatment))
+        conn.commit()
+        return c.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+
+def get_all_diseases_df():
+    c.execute("SELECT * FROM diseases ORDER BY id DESC")
+    rows = c.fetchall()
+    df = pd.DataFrame(rows, columns=['id', 'disease_name', 'symptom', 'treatment'])
+    return df
+
+# ---------- LOAD MODELS ----------
+try:
+    # TF 2.19: set compile=False to avoid InputLayer issues
+    img_model = load_model("plant_disease_model.h5", compile=False)
+    text_model = load_model("plant_text_model.h5", compile=False)
+
+    with open('tokenizer.pkl', 'rb') as f:
+        tokenizer = pickle.load(f)
+    with open('label_encoder.pkl', 'rb') as f:
+        label_encoder = pickle.load(f)
+except Exception as e:
+    st.error(f"Error loading models or necessary files: {e}")
+    st.stop()
+
+translator = Translator()
+
+# ---------- CLASS LABELS ----------
+class_labels = [
+    "Pepper__bell___Bacterial_spot",
+    "Pepper__bell___healthy",
+    "Potato___healthy",
+    "Potato___Early_blight",
+    "Potato___Late_blight",
+    "Tomato_Late_blight",
+    "Tomato_Early_blight",
+    "Tomato_Bacterial_spot",
+    "Tomato_Leaf_Mold",
+    "Tomato_Septoria_leaf_spot",
+    "Tomato_Spider_mites_Two_spotted_spider_mite",
+    "Tomato__Target_Spot",
+    "Tomato_healthy",
+    "Tomato__Tomato_mosaic_virus",
+    "Tomato__Tomato_YellowLeaf__Curl_Virus"
+]
+
+# ---------- DISEASE LOOKUP SAMPLE ----------
+data =[
+    ["yellow spots on leaves", "Leaf Spot", "Use fungicide and remove infected leaves"],
+    ["tiny circular yellow patches forming on leaf", "Leaf Spot", "Apply neem oil spray"],
+    ["brown concentric rings appearing on leaves", "Leaf Spot", "Use copper fungicide"],
+    ["dark lesions with yellow halo", "Leaf Spot", "Trim infected leaves and improve air circulation"],
+    ["irregular yellow blotches spreading quickly", "Leaf Spot", "Apply mancozeb spray"],
+    ["small brown spots on leaf edges", "Leaf Spot", "Remove affected leaves and spray fungicide"],
+    ["yellowish circles on older leaves", "Leaf Spot", "Use neem oil regularly"],
+    ["leaf edges turning brown with spots", "Leaf Spot", "Apply copper fungicide weekly"],
+    ["clusters of yellow spots on leaves", "Leaf Spot", "Remove infected leaves immediately"],
+    ["dark spots with water-soaked margins", "Leaf Spot", "Improve drainage and spray fungicide"],
+    ["white powdery layer covering leaf surface", "Powdery Mildew", "Spray sulfur solution"],
+    ["fine white dust visible on leaves", "Powdery Mildew", "Use baking soda spray"],
+    ["leaves appear whitish and curled", "Powdery Mildew", "Apply potassium bicarbonate"],
+    ["powdery growth on stems and buds", "Powdery Mildew", "Ensure good airflow and use fungicide"],
+    ["white fuzzy coating under sunlight", "Powdery Mildew", "Spray horticultural oil"],
+    ["leaf tips curling with white patches", "Powdery Mildew", "Use neem extract"],
+    ["young leaves coated with white dust", "Powdery Mildew", "Remove severely infected leaves"],
+    ["powdery appearance on buds", "Powdery Mildew", "Spray potassium bicarbonate weekly"],
+    ["white coating spreads to new leaves", "Powdery Mildew", "Increase sunlight exposure"],
+    ["stems covered in white powder", "Powdery Mildew", "Prune and spray fungicide"],
+    ["leaves turning brown and wilting", "Blight", "Use copper fungicide and improve drainage"],
+    ["rapid browning starting from leaf edges", "Blight", "Remove infected plants and spray fungicide"],
+    ["dark brown irregular patches on foliage", "Blight", "Use chlorothalonil spray"],
+    ["entire plant wilts suddenly", "Blight", "Improve soil drainage and apply fungicide"],
+    ["water-soaked lesions expanding fast", "Blight", "Destroy infected parts and rotate crops"],
+    ["brown streaks on stems", "Blight", "Remove affected stems and spray fungicide"],
+    ["lower leaves turning dark brown", "Blight", "Apply copper fungicide every 7 days"],
+    ["fruit surfaces developing sunken spots", "Blight", "Use preventive fungicide spray"],
+    ["sudden leaf drop with brown spots", "Blight", "Improve ventilation and remove debris"],
+    ["wilting of entire branches", "Blight", "Prune and disinfect tools"],
+    ["yellowing between veins", "Nutrient Deficiency", "Add nitrogen fertilizer"],
+    ["pale leaves with green veins", "Nutrient Deficiency", "Add iron supplement"],
+    ["slow growth and stunted plants", "Nutrient Deficiency", "Use balanced NPK fertilizer"],
+    ["older leaves turning purple", "Nutrient Deficiency", "Apply phosphorus fertilizer"],
+    ["leaf edges turning brown and dry", "Nutrient Deficiency", "Add potassium fertilizer"],
+    ["new leaves small and pale", "Nutrient Deficiency", "Provide micronutrients"],
+    ["tips of leaves turning yellow", "Nutrient Deficiency", "Supplement nitrogen"],
+    ["chlorosis on young leaves", "Nutrient Deficiency", "Use chelated iron fertilizer"],
+    ["stunted flowering", "Nutrient Deficiency", "Increase phosphorus in soil"],
+    ["leaves curling with yellow margins", "Nutrient Deficiency", "Add magnesium fertilizer"],
+    ["black mold growing on leaf surface", "Sooty Mold", "Spray neem oil and wash leaves"],
+    ["sticky black coating reducing photosynthesis", "Sooty Mold", "Remove insects and wash leaves"],
+    ["dark soot-like deposit on stems", "Sooty Mold", "Control aphids and mealybugs"],
+    ["leaves appear dirty with black dust", "Sooty Mold", "Prune affected leaves and spray soap solution"],
+    ["fungal black coating on fruit and leaves", "Sooty Mold", "Improve airflow and use fungicide"],
+    ["black fungal growth under humidity", "Sooty Mold", "Wash leaves regularly and spray insecticide"],
+    ["leaves covered in sticky black layer", "Sooty Mold", "Control sap-sucking insects"],
+    ["branch surfaces coated in soot", "Sooty Mold", "Prune affected areas and clean plants"],
+    ["black powdery patches on stems", "Sooty Mold", "Use neem oil spray every 5 days"],
+    ["dark deposits reduce photosynthesis", "Sooty Mold", "Keep plants free of aphids"],
+    ["yellow mosaic patterns on leaves", "Viral Mosaic", "Remove infected plants immediately"],
+    ["distorted leaves with patchy yellow color", "Viral Mosaic", "Control insect vectors"],
+    ["mottled green and yellow patches", "Viral Mosaic", "Apply neem oil against aphids"],
+    ["leaves curl and show mixed colors", "Viral Mosaic", "Use virus-resistant varieties"],
+    ["stunted growth with mosaic-like leaves", "Viral Mosaic", "Destroy infected plants"],
+    ["leaf deformation with discoloration", "Viral Mosaic", "Remove affected plants quickly"],
+    ["patchy yellowing of young leaves", "Viral Mosaic", "Control whiteflies and aphids"],
+    ["vein clearing with mosaic pattern", "Viral Mosaic", "Use resistant varieties"],
+    ["yellow streaks along leaf veins", "Viral Mosaic", "Destroy infected crops"],
+    ["uneven green and yellow leaves", "Viral Mosaic", "Monitor and remove sick plants"],
+    ["wilted leaves despite enough water", "Root Rot", "Improve drainage and avoid overwatering"],
+    ["roots appear brown and mushy", "Root Rot", "Use fungicide drench"],
+    ["plants collapsing suddenly", "Root Rot", "Remove infected plants"],
+    ["yellowing leaves from bottom upward", "Root Rot", "Improve soil aeration"],
+    ["foul smell from roots", "Root Rot", "Reduce watering frequency"],
+    ["roots turning black with slime", "Root Rot", "Treat soil with fungicide"],
+    ["stunted growth with wilting", "Root Rot", "Check soil drainage and remove infected plants"],
+    ["leaves drooping suddenly", "Root Rot", "Avoid overwatering and improve drainage"],
+    ["root tips rotting", "Root Rot", "Apply fungicide and aerate soil"],
+    ["plants dying after rain", "Root Rot", "Ensure proper drainage"],
+    ["holes in leaves caused by insects", "Leaf Miner", "Spray neem oil"],
+    ["white tunnels on leaf surface", "Leaf Miner", "Introduce natural predators"],
+    ["curved trails on green leaves", "Leaf Miner", "Apply spinosad spray"],
+    ["thin winding lines across leaf blade", "Leaf Miner", "Remove infected leaves"],
+    ["leaf curling with visible larva inside", "Leaf Miner", "Use insecticidal soap"],
+    ["larvae visible inside leaves", "Leaf Miner", "Introduce parasitic wasps"],
+    ["white squiggly lines on leaves", "Leaf Miner", "Remove damaged leaves"],
+    ["leaf edges eaten irregularly", "Leaf Miner", "Apply neem-based insecticide"],
+    ["tunnels causing leaf yellowing", "Leaf Miner", "Use sticky traps"],
+    ["mined leaves drying", "Leaf Miner", "Control insect population"],
+    ["chewed leaves with irregular holes", "Caterpillar Damage", "Handpick caterpillars"],
+    ["green worms feeding on young leaves", "Caterpillar Damage", "Spray Bt (Bacillus thuringiensis)"],
+    ["leaves eaten from edges", "Caterpillar Damage", "Introduce natural predators"],
+    ["silk webbing with caterpillars inside", "Caterpillar Damage", "Destroy infected parts"],
+    ["plants defoliated overnight", "Caterpillar Damage", "Use neem spray"],
+    ["caterpillars on stems and leaves", "Caterpillar Damage", "Apply insecticide regularly"],
+    ["holes in buds and flowers", "Caterpillar Damage", "Handpick and remove caterpillars"],
+    ["green larvae visible", "Caterpillar Damage", "Spray Bt formulation"],
+    ["leaves skeletonized", "Caterpillar Damage", "Introduce ladybugs or wasps"],
+    ["young shoots eaten", "Caterpillar Damage", "Apply neem oil spray"],
+    ["tiny yellow specks and webbing", "Spider Mite Infestation", "Spray miticide"],
+    ["fine web covering leaves", "Spider Mite Infestation", "Wash leaves with water"],
+    ["bronzed and dry leaves", "Spider Mite Infestation", "Apply horticultural oil"],
+    ["abc", "Unknown", "No treatment available"],
+    ["random test", "Unknown", "No treatment available"],
+    ["hello world", "Unknown", "No treatment available"],
+    ["tiny red moving dots on underside of leaf", "Spider Mite Infestation", "Introduce ladybugs"],
+    ["leaves falling prematurely", "Spider Mite Infestation", "Spray sulfur solution"],
+    ["webbing across young leaves", "Spider Mite Infestation", "Apply neem oil"],
+    ["stippled leaves with yellow spots", "Spider Mite Infestation", "Use miticide spray"],
+    ["leaves turning bronze", "Spider Mite Infestation", "Increase humidity and spray oil"],
+    ["mites visible with magnifying glass", "Spider Mite Infestation", "Introduce predatory mites"],
+    ["webs causing leaf damage", "Spider Mite Infestation", "Wash leaves and spray neem"],
+    ["brown raised spots on fruit surface", "Rust", "Spray sulfur fungicide"],
+    ["orange powdery pustules under leaf", "Rust", "Remove infected leaves"],
+    ["yellow flecks on leaf surface", "Rust", "Apply neem oil"],
+    ["rust-colored patches on stems", "Rust", "Use copper fungicide"],
+    ["spores spreading rapidly on underside", "Rust", "Spray mancozeb"],
+    ["leaves have yellow spots with dark borders", "Leaf Spot", "Apply a broad-spectrum fungicide and improve air circulation."],
+    ["small, dark, water-soaked spots on lower leaves", "Leaf Spot", "Avoid overhead watering and apply copper-based fungicide."],
+    ["tan to dark brown spots developing on foliage", "Leaf Spot", "Remove and destroy infected leaves; apply chlorothalonil."],
+    ["spots on leaves enlarging into irregular blotches", "Leaf Spot", "Ensure proper plant spacing and use a systemic fungicide."],
+    ["velvety brown spots on underside of leaves", "Leaf Spot", "Spray with mancozeb and remove plant debris from soil."],
+    ["grayish spots with tiny black dots in the center", "Leaf Spot", "Use a fungicide containing propiconazole and prune affected areas."],
+    ["leaves turning yellow and dropping prematurely after spotting", "Leaf Spot", "Maintain plant vigor with proper fertilization and watering."],
+    ["shot-hole appearance on leaves as spots fall out", "Leaf Spot", "Apply neem oil as a preventive measure; ensure good drainage."],
+    ["papery, tan spots on leaves exposed to sun", "Leaf Spot", "Provide afternoon shade if possible and use a suitable fungicide."],
+    ["dark purple to black spots on rose leaves", "Black Spot", "Use a fungicide specifically for black spot; remove infected leaves."],
+    ["black, raised spots on foliage, often with yellow halos", "Black Spot", "Prune plants to improve air circulation and spray with myclobutanil."],
+    ["defoliation of lower leaves due to black spots", "Black Spot", "Rake and destroy fallen leaves; apply a dormant spray in winter."],
+    ["fringed, irregular black spots on leaves", "Black Spot", "Water plants at the base to keep foliage dry; use sulfur fungicides."],
+    ["powdery mildew spreading from leaves to flowers", "Powdery Mildew", "Spray with horticultural oil, but not in direct sun."],
+    ["leaves distorted and stunted by white powdery growth", "Powdery Mildew", "Increase air circulation and apply a potassium bicarbonate solution."],
+    ["yellow spots on upper leaf surface, fluffy grey mold underneath", "Downy Mildew", "Avoid overhead irrigation; improve air movement."],
+    ["downy purple growth on the underside of grape leaves", "Downy Mildew", "Apply fungicides containing mancozeb or copper."],
+    ["angular, yellow to brown lesions limited by leaf veins", "Downy Mildew", "Remove infected plant debris and ensure leaves dry quickly."],
+    ["white, fuzzy growth on seedlings causing them to collapse", "Damping Off", "Use sterile potting mix and avoid overwatering seedlings."],
+    ["stems of young plants constrict and rot at soil line", "Damping Off", "Ensure good air circulation and thin seedlings properly."],
+    ["cankers or sunken lesions on stems, often with rings", "Anthracnose", "Prune out infected branches and apply a copper-based fungicide."],
+    ["dark, sunken spots on fruits and pods", "Anthracnose", "Rotate crops and remove infected plant material from the garden."],
+    ["leaves show dark spots, sometimes dropping out", "Anthracnose", "Use disease-resistant varieties and spray with fungicide at first sign."],
+    ["twig dieback caused by spreading cankers", "Anthracnose", "Prune well below cankers in dry weather; disinfect tools."],
+    ["pinkish spore masses appearing on lesions in wet conditions", "Anthracnose", "Avoid working with plants when they are wet."],
+    ["rapid dieback of branches and shoots", "Blight", "Prune infected branches well below the diseased area."],
+    ["flowers and twigs turning black and shriveling", "Fire Blight", "Avoid high-nitrogen fertilizers; prune infected areas in winter."],
+    ["oozing cankers on branches in humid weather", "Fire Blight", "Spray with a bactericide containing copper during bloom."],
+    ["shepherd's crook shape on affected young shoots", "Fire Blight", "Cut out infected branches, sterilizing tools between each cut."],
+    ["leaves suddenly wilt, turning dark brown or black", "Blight", "Improve soil health and avoid water stress on plants."],
+    ["bulls-eye pattern on brown leaf spots", "Early Blight", "Stake plants to improve air circulation; apply copper fungicide."],
+    ["yellowing around leaf spots on lower, older leaves", "Early Blight", "Mulch around plants to reduce soil splash; rotate crops."],
+    ["dark, sunken lesions on stems near the soil line", "Early Blight", "Ensure proper spacing and apply preventative fungicides."],
+    ["greasy-looking, water-soaked spots on leaves", "Bacterial Leaf Spot", "Avoid overhead watering; remove infected leaves promptly."],
+    ["bacterial spots turning black and becoming angular", "Bacterial Leaf Spot", "Spray with copper-based bactericides."],
+    ["orange-red pustules on the underside of leaves", "Rust", "Provide good air circulation and avoid wetting foliage."],
+    ["yellow or white spots on upper leaf surfaces, with rust below", "Rust", "Remove and destroy infected leaves; apply sulfur or neem oil."],
+    ["stems and leaves covered in rust-colored powder", "Rust", "Use rust-resistant plant varieties; apply fungicides as needed."],
+    ["premature leaf drop due to severe rust infection", "Rust", "Clean up all plant debris in the fall to reduce overwintering spores."],
+    ["stunted growth with distorted, mottled leaves", "Viral Mosaic", "Control aphid populations as they spread the virus."],
+    ["veins on leaves turning yellow or clear", "Viral Mosaic", "There is no cure; remove and destroy infected plants immediately."],
+    ["ring-like spots or patterns on leaves", "Viral Mosaic", "Wash hands and tools after handling infected plants."],
+    ["plants appear generally weak and unproductive", "Viral Mosaic", "Plant virus-indexed or certified virus-free stock."],
+    ["clusters of tiny green or black insects on new growth", "Aphid Infestation", "Spray with insecticidal soap or a strong jet of water."],
+    ["leaves are curled, distorted, and yellowing", "Aphid Infestation", "Introduce beneficial insects like ladybugs or lacewings."],
+    ["sticky substance (honeydew) on leaves and stems", "Aphid Infestation", "Wash off with soapy water; control ant populations that farm aphids."],
+    ["black sooty mold growing on honeydew", "Aphid Infestation", "Control aphids first, then gently wash mold from leaves."],
+    ["stunted plant growth and weak stems", "Aphid Infestation", "Apply neem oil or horticultural oil to smother the insects."],
+    ["tiny white insects that fly up when disturbed", "Whitefly Infestation", "Use yellow sticky traps to monitor and trap adults."],
+    ["sticky honeydew leading to sooty mold", "Whitefly Infestation", "Spray with insecticidal soap, targeting the underside of leaves."],
+    ["leaf yellowing and drying out from whitefly feeding", "Whitefly Infestation", "Introduce natural predators like lacewing larvae."],
+    ["cottony white masses in leaf axils and on stems", "Mealybug Infestation", "Dab individual mealybugs with a cotton swab dipped in rubbing alcohol."],
+    ["stunted growth and leaf drop from mealybugs", "Mealybug Infestation", "Spray with insecticidal soap or neem oil."],
+    ["ants are attracted to the honeydew from mealybugs", "Mealybug Infestation", "Control ant populations to prevent them from protecting mealybugs."],
+    ["silvery or bronze stippling on leaf surfaces", "Thrips Damage", "Spray with a strong stream of water and apply insecticidal soap."],
+    ["distorted and stunted new growth", "Thrips Damage", "Remove and destroy infested leaves and flowers."],
+    ["tiny black specks (excrement) visible on leaves", "Thrips Damage", "Use blue or yellow sticky traps to capture thrips."],
+    ["flower petals are streaked and discolored", "Thrips Damage", "Introduce beneficial insects like predatory mites or lacewings."],
+    ["large, ragged holes chewed in leaves", "Caterpillar Damage", "Handpick caterpillars and drop them into soapy water."],
+    ["skeletonized leaves with only veins remaining", "Caterpillar Damage", "Spray with Bacillus thuringiensis (Bt), which is specific to caterpillars."],
+    ["webbing or tents on branches with caterpillars inside", "Caterpillar Damage", "Prune out and destroy the nests."],
+    ["black droppings (frass) found on leaves below", "Caterpillar Damage", "Encourage natural predators like birds and wasps."],
+    ["new shoots and buds are eaten away", "Caterpillar Damage", "Use floating row covers on vegetables to prevent moths from laying eggs."],
+    ["winding trails or mines visible inside leaves", "Leaf Miner", "Press on the trail to crush the larva inside."],
+    ["blotchy, transparent areas on leaves", "Leaf Miner", "Remove and destroy infested leaves to break the life cycle."],
+    ["leaves looking pale or yellow between leaf veins", "Iron Deficiency", "Apply a chelated iron spray directly to the foliage."],
+    ["newest leaves are the most yellow", "Iron Deficiency", "Check soil pH; high pH can make iron unavailable."],
+    ["stunted growth with overall pale green color", "Nitrogen Deficiency", "Apply a nitrogen-rich fertilizer like blood meal or a balanced liquid feed."],
+    ["lower, older leaves turn yellow first", "Nitrogen Deficiency", "Incorporate compost into the soil for a slow-release source of nitrogen."],
+    ["leaf edges turn yellow, then brown and crispy", "Potassium Deficiency", "Amend soil with potassium sulfate or kelp meal."],
+    ["purplish cast on leaves, especially older ones", "Phosphorus Deficiency", "Use a fertilizer high in phosphorus like bone meal."],
+    ["young leaves are cupped or distorted, blossom end rot on fruit", "Calcium Deficiency", "Apply a calcium spray or amend soil with gypsum."],
+    ["yellowing between veins on older leaves (marbling)", "Magnesium Deficiency", "Apply a solution of Epsom salts (magnesium sulfate) to the soil or as a foliar spray."],
+    ["plant wilting during the day but recovering at night", "Underwatering", "Water the plant deeply and thoroughly until water runs out the bottom."],
+    ["soil is dry and pulling away from the sides of the pot", "Underwatering", "Soak the entire pot in a basin of water for 30 minutes."],
+    ["leaves are brown, dry, and crispy at the edges", "Underwatering", "Increase watering frequency, especially in hot or windy weather."],
+    ["lower leaves turning yellow and dropping", "Overwatering", "Allow the top inch or two of soil to dry out before watering again."],
+    ["roots are brown, mushy, and may have a foul odor", "Root Rot", "Repot the plant in fresh, well-draining soil, trimming away dead roots."],
+    ["stunted growth and general lack of vigor despite wet soil", "Overwatering", "Ensure the pot has adequate drainage holes."],
+    ["white, papery, or bleached areas on leaves", "Sun Scorch", "Move the plant to a location with less intense, direct sunlight."],
+    ["brown, scorched patches on fruit exposed to sun", "Sun Scorch", "Encourage a healthy leaf canopy to shade the fruit."],
+    ["leaves look burned after moving plant to a new location", "Sun Scorch", "Acclimate plants gradually to brighter light conditions."],
+    ["brown or black leaf tips and edges", "Salt Buildup", "Flush the soil by watering heavily and letting it drain completely."],
+    ["white crusty residue on soil surface or pot rim", "Salt Buildup", "Use filtered or rainwater instead of tap water if your water is hard."],
+    ["stunted growth despite proper care", "Salt Buildup", "Repot every 1-2 years with fresh potting mix."],
+    ["pitting or scarring on leaves and fruit", "Hail Damage", "Prune away severely damaged leaves and branches."],
+    ["shredded or tattered leaves after a storm", "Hail Damage", "Provide supportive care (water, light fertilizer) to help the plant recover."],
+    ["bronze or reddish discoloration of leaves", "Spider Mite Infestation", "Increase humidity around the plant as mites prefer dry conditions."],
+    ["very fine webbing, especially on new growth or leaf axils", "Spider Mite Infestation", "Spray forcefully with water, especially under leaves."],
+    ["plants appear dusty and lackluster", "Spider Mite Infestation", "Apply horticultural oil or neem oil to smother mites."],
+    ["tiny moving specks visible on a white piece of paper held under a leaf", "Spider Mite Infestation", "Introduce predatory mites as a biological control."],
+    ["white, powdery fungus on soil surface", "Harmless Soil Fungus", "Improve air circulation and let soil dry out more between waterings."],
+    ["mushrooms growing in potting soil", "Harmless Soil Fungus", "Simply pull them out; they indicate rich, organic soil."],
+    ["green moss or algae on top of soil", "Excess Moisture", "Scrape it off and reduce watering frequency."],
+    ["plant is dropping healthy green leaves", "Environmental Shock", "Check for drafts, temperature changes, or recent repotting."],
+    ["leaves turning pale and leggy growth", "Insufficient Light", "Move the plant to a brighter location with more indirect sunlight."],
+    ["plant fails to produce flowers or fruit", "Insufficient Light", "Ensure the plant is receiving the recommended hours of light for its type."],
+    ["variegated leaves losing their color patterns", "Insufficient Light", "Provide more light, as variegation requires more energy to maintain."],
+    ["scorched or blackened leaves after a cold snap", "Frost Damage", "Do not prune damaged parts until new growth appears in spring."],
+    ["sudden wilting of the entire plant after a frost", "Frost Damage", "Cover plants with a cloth or frost blanket if a frost is predicted."],
+    ["root ball is a dense, tangled mass", "Root Bound", "Repot into a slightly larger container, gently teasing the roots apart."],
+    ["water runs straight through the pot without soaking in", "Root Bound", "Soak the entire pot to rehydrate the root ball before repotting."],
+    ["stunted growth and rapid drying of soil", "Root Bound", "Check roots annually and repot as needed."],
+    ["physical damage from wind or animals", "Mechanical Injury", "Prune away broken branches cleanly to promote healing."],
+    ["split stems or bark wounds", "Mechanical Injury", "Allow the wound to dry and callous over; do not apply sealants."],
+    ["yellowing leaves with green veins on acid-loving plants", "High Soil pH", "Amend soil with sulfur or use an acidifying fertilizer."],
+    ["poor growth in plants like rhododendrons or blueberries", "High Soil pH", "Incorporate pine bark mulch or peat moss to lower soil pH over time."],
+    ["sticky patches on leaves without visible insects", "Scale Infestation", "Look for small, hard, immobile bumps on stems and leaves."],
+    ["hard, shell-like bumps on plant stems", "Scale Infestation", "Scrape them off with a fingernail or use a horticultural oil spray."],
+    ["yellowing leaves and branch dieback", "Scale Infestation", "Prune out heavily infested branches and apply systemic insecticide for severe cases."],
+    ["dark, sunken canker at the base of the tomato plant", "Collar Rot", "Ensure good air circulation and avoid soil buildup around the stem."],
+    ["white, thread-like strands on soil and roots", "Mycelium (Fungal Growth)", "Generally harmless, but can indicate overly moist soil conditions."],
+    ["slimy trails on leaves, with holes chewed", "Snail/Slug Damage", "Handpick them at night or use beer traps or iron phosphate bait."],
+    ["leaves eaten down to the stalk overnight", "Snail/Slug Damage", "Create barriers with crushed eggshells or copper tape around pots."],
+    ["round, swollen galls or knots on roots", "Root-Knot Nematodes", "Rotate crops with nematode-resistant varieties like marigolds."],
+    ["stunted, yellowed plants that wilt easily", "Root-Knot Nematodes", "Solarize the soil in summer to kill nematodes; improve soil organic matter."],
+    ["brown spots on flower petals", "Botrytis Blight", "Remove faded flowers promptly and improve air circulation."],
+    ["gray, fuzzy mold on aging flowers and soft fruits", "Botrytis Blight", "Reduce humidity and avoid overhead watering."],
+    ["cankers on stems causing dieback", "Botrytis Blight", "Prune out infected tissue and apply a suitable fungicide."],
+    ["holes in fruit near the stem", "Codling Moth", "Use pheromone traps to monitor and disrupt mating."],
+    ["tunneling and frass inside apples and pears", "Codling Moth", "Bag individual fruits on the tree to protect them."],
+    ["white, waxy substance on leaves and stems", "Psyllid Damage", "Spray with horticultural oil or insecticidal soap."],
+    ["leaf yellowing, curling, and distortion", "Psyllid Damage", "Encourage natural enemies like parasitic wasps."],
+    ["leaves look bleached with fine black specks", "Lace Bug Damage", "Check underside of leaves for small, ornate insects."],
+    ["yellowing and stippling on leaf tops", "Lace Bug Damage", "Spray underside of leaves with insecticidal soap."],
+    ["dark, varnish-like excrement on leaf undersides", "Lace Bug Damage", "Control with neem oil sprays, ensuring good coverage."],
+    ["sudden death of a branch or the entire plant", "Verticillium Wilt", "No cure; remove and destroy the plant. Do not replant susceptible species in the same spot."],
+    ["yellowing and wilting on one side of the plant or leaf", "Verticillium Wilt", "Plant resistant varieties and practice good sanitation."],
+    ["streaking and discoloration in the vascular tissue (sapwood)", "Verticillium Wilt", "Avoid high-nitrogen fertilizers which can worsen the disease."],
+    ["wilting of leaves during the hottest part of the day", "Fusarium Wilt", "Similar to Verticillium; remove plant and solarize soil."],
+    ["yellowing of lower leaves, often on one side", "Fusarium Wilt", "Plant fusarium-resistant varieties (often marked with an 'F')."],
+    ["brown discoloration of internal stem tissue", "Fusarium Wilt", "Maintain a soil pH around 6.5-7.0 to suppress the fungus."],
+    ["notching on leaf margins from adult feeding", "Vine Weevil", "Check plants at night for adult weevils and handpick."],
+    ["sudden wilting of plant, roots have been eaten", "Vine Weevil Larvae", "Drench soil with beneficial nematodes to control the larvae."],
+    ["girdling of stems at the soil line by larvae", "Vine Weevil Larvae", "Use a soil-applied insecticide in severe cases."],
+    ["foam or 'spit' on plant stems", "Spittlebug", "Rinse off with a strong jet of water; damage is usually minimal."],
+    ["hidden insect inside a frothy mass", "Spittlebug", "Generally does not require chemical control."],
+    ["perfectly circular holes cut from leaf edges", "Leafcutter Bee", "Harmless; it's a sign of a beneficial pollinator at work."],
+    ["using leaf pieces for its nest", "Leafcutter Bee", "No control needed; protect these important pollinators."],
+    ["swollen, distorted green growths on leaves or stems", "Galls", "Caused by insects or mites; usually cosmetic and harmless."],
+    ["unusual growths on oak leaves or rose stems", "Galls", "Prune off if unsightly, but control is not necessary."],
+    ["leaves are twisted and covered in sticky honeydew", "Aphid Infestation", "Prune out heavily infested tips of branches."],
+    ["white cast skins of aphids visible on leaves", "Aphid Infestation", "A sign of a healthy, growing aphid population that needs control."],
+    ["plants near walkways showing stunted growth and dieback", "Soil Compaction", "Aerate the soil and apply a top dressing of compost."],
+    ["water puddles on soil surface after rain", "Soil Compaction", "Avoid walking on garden beds, especially when wet."],
+    ["stunted growth with purple-tinged older leaves", "Phosphorus Deficiency", "Ensure soil pH is not too high or low; apply bone meal."],
+    ["weak stems and poor fruit or seed development", "Phosphorus Deficiency", "Use a starter fertilizer high in phosphorus for new plantings."],
+    ["leaf scorch with browning along the margins", "Potassium Deficiency", "Amend soil with wood ash (in moderation) or greensand."],
+    ["yellowing between veins, starting at the leaf tip", "Manganese Deficiency", "Apply a foliar spray of manganese sulfate."],
+    ["new leaves emerging small and pale with yellowing", "Zinc Deficiency", "Spray with a chelated zinc solution."],
+    ["dieback of new growth and stunted development", "Boron Deficiency", "Apply a very small amount of borax dissolved in water to the soil."],
+    ["dark green or bluish foliage, stunted plants", "Cold Stress", "Protect plants from cold snaps and avoid fertilizing late in the season."],
+    ["wilting and scorched appearance in high temperatures", "Heat Stress", "Provide temporary shade and ensure consistent moisture."],
+    ["blossom drop on tomatoes or peppers", "Heat Stress", "Mulch soil to keep roots cool; water deeply in the mornings."],
+    ["leaves covered in a thin layer of dust or grime", "Air Pollution/Dust", "Gently wipe leaves with a damp cloth to improve photosynthesis."],
+    ["poor growth in urban or high-traffic areas", "Air Pollution/Dust", "Regularly rinse foliage to keep it clean."],
+    ["distorted growth after herbicide application nearby", "Herbicide Drift", "Prune off affected parts if minor; severe damage may be fatal."],
+    ["cupped leaves and twisted stems with no sign of pests", "Herbicide Drift", "Be cautious when applying weed killers on windy days."],
+    ["decline of a tree with mushrooms at the base", "Armillaria Root Rot", "No cure; remove the tree and as many roots as possible to prevent spread."],
+    ["white, fan-like fungal growth under the bark near the soil line", "Armillaria Root Rot", "Maintain tree vigor with proper watering and feeding."],
+    ["slimy, wet decay on fruits and vegetables", "Soft Rot", "Avoid bruising produce during harvest; store in cool, dry conditions."],
+    ["unpleasant odor from rotting plant tissue", "Soft Rot", "Improve soil drainage and rotate crops."],
+    ["dark, circular spots on leaves with a target-like appearance", "Alternaria Leaf Spot", "Remove infected leaves and apply a fungicide."],
+    ["cankers on stems of tomatoes", "Alternaria Leaf Spot", "Ensure good air circulation and avoid overhead watering."],
+    ["chlorosis of leaves in a mosaic pattern", "Nutrient Lockout", "Check and adjust soil pH to the appropriate range for the plant."],
+    ["stunted growth even with regular fertilizing", "Nutrient Lockout", "Flush soil with plain water to remove excess mineral salts."],
+    ["leaves have a scorched appearance on the edges", "Fertilizer Burn", "Leach soil with plenty of water to wash out excess fertilizer."],
+    ["white, crusty layer on the soil after feeding", "Fertilizer Burn", "Always water plants before applying liquid fertilizer."],
+     ["a", "Unknown", "Input does not describe a plant symptom."],
+    ["is this a plant", "Unknown", "Input does not describe a plant symptom."],
+    ["abc", "Unknown", "Input does not describe a plant symptom."],
+    ["hello", "Unknown", "Input does not describe a plant symptom."],
+    ["hi", "Unknown", "Input does not describe a plant symptom."],
+    ["how are you", "Unknown", "Input does not describe a plant symptom."],
+    ["good morning", "Unknown", "Input does not describe a plant symptom."],
+    ["test input", "Unknown", "Input does not describe a plant symptom."],
+    ["asdfghjkl", "Unknown", "Input does not describe a plant symptom."],
+    ["what is this app", "Unknown", "Input does not describe a plant symptom."],
+    ["can you help me", "Unknown", "Input does not describe a plant symptom."],
+    ["my plant is green", "Unknown", "Input does not describe a plant symptom."],
+    ["this is a test", "Unknown", "Input does not describe a plant symptom."],
+    ["I have a question", "Unknown", "Input does not describe a plant symptom."],
+    ["please analyze", "Unknown", "Input does not describe a plant symptom."],
+    ["thank you", "Unknown", "Input does not describe a plant symptom."],
+    ["what is a leaf", "Unknown", "Input does not describe a plant symptom."],
+    ["leaf", "Unknown", "Input does not describe a plant symptom."],
+    ["plant", "Unknown", "Input does not describe a plant symptom."],
+    ["flower", "Unknown", "Input does not describe a plant symptom."],
+    ["my tomato plant", "Unknown", "Input does not describe a plant symptom."],
+    ["the weather is nice today", "Unknown", "Input does not describe a plant symptom."],
+    ["12345", "Unknown", "Input does not describe a plant symptom."],
+    ["what is your name", "Unknown", "Input does not describe a plant symptom."],
+    ["this is not working", "Unknown", "Input does not describe a plant symptom."],
+    ["okay", "Unknown", "Input does not describe a plant symptom."],
+    ["random text", "Unknown", "Input does not describe a plant symptom."],
+    ["soil is dry", "Unknown", "Input does not describe a plant symptom."],
+    ["needs water", "Unknown", "Input does not describe a plant symptom."],
+    ["beautiful flower", "Unknown", "Input does not describe a plant symptom."],
+    ["leaves with reddish spots", "Rust", "Remove affected leaves"],
+    ["orange lesions on flowers", "Rust", "Use preventive fungicide"],
+    ["spots expanding rapidly", "Rust", "Prune and spray fungicide"],
+    ["rust marks on leaf veins", "Rust", "Apply neem or copper fungicide"],
+    ["plants weakening due to rust", "Rust", "Monitor and treat affected plants"]
+]
+df_lookup = pd.DataFrame(data, columns=['symptom','disease','treatment'])
+
+# ---------- STREAMLIT UI ----------
+st.title("🌱 Plant Disease Detection System")
+
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+if 'role' not in st.session_state:
+    st.session_state['role'] = None
+if 'username' not in st.session_state:
+    st.session_state['username'] = None
+
+# ---------- SIDEBAR AUTHENTICATION ----------
+st.sidebar.title("Authentication")
+
+if st.session_state['logged_in']:
+    st.sidebar.success(f"Logged in as {st.session_state['username']} ({st.session_state['role']})")
+    if st.sidebar.button("Logout"):
+        st.session_state['logged_in'] = False
+        st.session_state['role'] = None
+        st.session_state['username'] = None
+        st.rerun()
+else:
+    st.sidebar.subheader("Login")
+    username = st.sidebar.text_input("Username", key="login_user")
+    password = st.sidebar.text_input("Password", type="password", key="login_pass")
+    if st.sidebar.button("Login"):
+        is_valid, role = check_user(username, password)
+        if is_valid:
+            st.session_state['logged_in'] = True
+            st.session_state['role'] = role
+            st.session_state['username'] = username
+            st.rerun()
+        else:
+            st.sidebar.error("Invalid username or password")
+
+# ---------- ADMIN PANEL ----------
+if st.session_state['logged_in']:
+    role = st.session_state['role']
+
+    if role == "Admin":
+        st.subheader("Admin Panel — Add or manage diseases")
+        st.write("Add a new symptom → disease → treatment row to the database.")
+
+        with st.form("add_disease_form"):
+            s_symptom = st.text_input("Symptom (text description)")
+            s_disease = st.text_input("Disease name")
+            s_treatment = st.text_area("Suggested treatment")
+            submitted = st.form_submit_button("Add to DB")
+            if submitted:
+                if not s_symptom.strip() or not s_disease.strip():
+                    st.error("Symptom and disease fields cannot be empty.")
+                else:
+                    new_id = add_disease_to_db(s_symptom.strip(), s_disease.strip(), s_treatment.strip())
+                    if new_id:
+                        st.success(f"Inserted disease row id={new_id}")
+                    else:
+                        st.warning("This disease already exists in the database.")
+
+        st.markdown("---")
+        st.write("Current disease rows (most recent first):")
+        df_db = get_all_diseases_df()
+        st.dataframe(df_db)
+
+# ---------- FARMER PANEL ----------
+    elif role == "Farmer":
+        st.subheader("Detect Disease by Image 📷")
+        uploaded_file = st.file_uploader("Upload a plant image", type=['jpg','png','jpeg'])
+        if uploaded_file:
+            img = image.load_img(uploaded_file, target_size=(64,64))
+            img_array = image.img_to_array(img)/255.0
+            img_array = np.expand_dims(img_array, axis=0)
+            predictions = img_model.predict(img_array, verbose=0)
+            confidence = np.max(predictions[0])
+            predicted_index = np.argmax(predictions[0])
+            predicted_class = class_labels[predicted_index] if confidence > 0.6 else "Cannot determine disease from image"
+
+            st.image(uploaded_file, caption='Uploaded Image', use_column_width=True)
+            st.success(f"Predicted Disease: {predicted_class.replace('_', ' ')}")
+            st.info(f"Confidence: {confidence:.2f}")
+
+        st.subheader("Detect Disease by Symptom 💬")
+        symptom_input = st.text_input("Enter symptom (e.g., 'yellow spots on leaves')")
+        input_lang = st.selectbox("Select input language", options=['auto', 'en', 'es', 'hi', 'fr', 'de'])
+        if st.button("Predict Disease") and symptom_input:
+            translated = translator.translate(symptom_input, src=input_lang, dest="en").text
+            seq = tokenizer.texts_to_sequences([translated])
+            seq = tf.keras.preprocessing.sequence.pad_sequences(seq, maxlen=10)
+            pred = text_model.predict(seq, verbose=0)
+            disease_idx = np.argmax(pred)
+            disease_name = label_encoder.inverse_transform([disease_idx])[0]
+
+            treatment_row = df_lookup[df_lookup['disease']==disease_name]['treatment']
+            treatment = treatment_row.iloc[0] if not treatment_row.empty else "No specific treatment found."
+
+            st.write(f"**Translated Symptom:** {translated}")
+            st.success(f"**Predicted Disease:** {disease_name}")
+            st.info(f"**Suggested Treatment:** {treatment}")
+
+else:
+    st.info("Please log in on the sidebar to access the disease detection system.")
