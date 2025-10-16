@@ -73,23 +73,16 @@ except Exception as e:
 translator = Translator()
 
 # ---------- CLASS LABELS ----------
-class_labels = [
-    "Pepper__bell___Bacterial_spot",
-    "Pepper__bell___healthy",
-    "Potato___healthy",
-    "Potato___Early_blight",
-    "Potato___Late_blight",
-    "Tomato_Late_blight",
-    "Tomato_Early_blight",
-    "Tomato_Bacterial_spot",
-    "Tomato_Leaf_Mold",
-    "Tomato_Septoria_leaf_spot",
-    "Tomato_Spider_mites_Two_spotted_spider_mite",
-    "Tomato__Target_Spot",
-    "Tomato_healthy",
-    "Tomato__Tomato_mosaic_virus",
-    "Tomato__Tomato_YellowLeaf__Curl_Virus"
-]
+import json
+
+# Load the real label mapping file
+with open("class_labels.json", "r") as f:
+    class_indices = json.load(f)
+
+# Sort by index to match model output order
+class_labels = [k for k, v in sorted(class_indices.items(), key=lambda item: item[1])]
+# st.write("Loaded class labels:", class_labels)
+
 
 # ---------- DISEASE LOOKUP SAMPLE ----------
 data =[
